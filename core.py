@@ -41,27 +41,36 @@ def get_mutual_connections(user1, user2):
     return list(graph[user1] & graph[user2])
 
 
+
 # Find shortest connection path using BFS
 def shortest_path(start, end):
     if start not in graph or end not in graph:
         return []
 
-    queue = deque([[start]])
+    queue = deque([start])
     visited = {start}
+    parent = {start: None}
 
     while queue:
-        path = queue.popleft()
-        current = path[-1]
+        current = queue.popleft()
 
         if current == end:
-            return path
+            path = []
+
+            while current is not None:
+                path.append(current)
+                current = parent[current]
+
+            return path[::-1]
 
         for neighbour in graph[current]:
             if neighbour not in visited:
                 visited.add(neighbour)
-                queue.append(path + [neighbour])
+                parent[neighbour] = current
+                queue.append(neighbour)
 
     return []
+
 
 
 # Recommend students based on mutual connections
