@@ -2,14 +2,38 @@
 import sqlite3
 import hashlib
 import secrets
+import platform
+import psycopg
+import streamlit as st
+
+
+# ---------------- DATABASE CONFIGURATION ----------------
+
+# Mac uses SQLite; Streamlit Cloud (Linux) uses PostgreSQL.
+USE_POSTGRES = platform.system() == "Linux"
 
 DB_NAME = "uniconnect.db"
 
 
-# ---------------- DATABASE CONNECTION ----------------
-
 def connect_db():
+    if USE_POSTGRES:
+        database_url = st.secrets["database"]["url"]
+        return psycopg.connect(database_url, sslmode="require")
+
     return sqlite3.connect(DB_NAME, timeout=10)
+
+
+# ---------------- QUERY EXECUTION ----------------
+
+def execute(cursor, query, params=()):
+    if USE_POSTGRES:
+        query = query.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+        query = query.replace("?", "%s")
+
+        if "INSERT INTO connections" in query:
+            query += " ON CONFLICT DO NOTHING"
+
+    cursor.execute(query, params)
 
 
 # ---------------- DATABASE INITIALISATION ----------------
@@ -18,44 +42,85 @@ def init_db():
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            name TEXT,
-            programme TEXT,
-            study_year TEXT,
-            bio TEXT,
-            skills TEXT
-        )
-    """)
+    if USE_POSTGRES:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                name TEXT,
+                programme TEXT,
+                study_year TEXT,
+                bio TEXT,
+                skills TEXT
+            )
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS connections (
-            user1 TEXT,
-            user2 TEXT,
-            PRIMARY KEY (user1, user2)
-        )
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connections (
+                user1 TEXT,
+                user2 TEXT,
+                PRIMARY KEY (user1, user2)
+            )
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender TEXT,
-            receiver TEXT,
-            status TEXT DEFAULT 'pending'
-        )
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id SERIAL PRIMARY KEY,
+                sender TEXT,
+                receiver TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            content TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                username TEXT,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                name TEXT,
+                programme TEXT,
+                study_year TEXT,
+                bio TEXT,
+                skills TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connections (
+                user1 TEXT,
+                user2 TEXT,
+                PRIMARY KEY (user1, user2)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender TEXT,
+                receiver TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     conn.commit()
     conn.close()
@@ -82,7 +147,7 @@ def register_user(username, password, name):
     password_hash = hash_password(password, salt)
 
     try:
-        cursor.execute("""
+        execute(cursor, """
             INSERT INTO users
             (username, password_hash, salt, name)
             VALUES (?, ?, ?, ?)
@@ -91,7 +156,7 @@ def register_user(username, password, name):
         conn.commit()
         return True
 
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
         return False
 
     finally:
@@ -104,7 +169,7 @@ def login_user(username, password):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT password_hash, salt
         FROM users
         WHERE username = ?
@@ -124,24 +189,22 @@ def login_user(username, password):
 
 # ---------------- USER INFORMATION ----------------
 
-# Get all student usernames
 def get_all_users():
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT username FROM users")
+    execute(cursor, "SELECT username FROM users")
     users = [row[0] for row in cursor.fetchall()]
 
     conn.close()
     return users
 
 
-# Get one student's profile
 def get_profile(username):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT username, name, programme, study_year, bio, skills
         FROM users
         WHERE username = ?
@@ -153,12 +216,11 @@ def get_profile(username):
     return profile
 
 
-# Get all student profiles in one database query
 def get_all_profiles():
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT username, name, programme, study_year, bio, skills
         FROM users
     """)
@@ -169,12 +231,11 @@ def get_all_profiles():
     return profiles
 
 
-# Update student profile
 def update_profile(username, name, programme, study_year, bio, skills):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         UPDATE users
         SET name = ?,
             programme = ?,
@@ -190,17 +251,14 @@ def update_profile(username, name, programme, study_year, bio, skills):
 
 # ---------------- CONNECTION REQUESTS ----------------
 
-# Send a connection request
 def send_request(sender, receiver):
-
     if sender == receiver:
         return False
 
     conn = connect_db()
     cursor = conn.cursor()
 
-    # Check whether both users exist
-    cursor.execute("""
+    execute(cursor, """
         SELECT COUNT(*)
         FROM users
         WHERE username IN (?, ?)
@@ -212,8 +270,7 @@ def send_request(sender, receiver):
 
     user1, user2 = sorted([sender, receiver])
 
-    # Check whether they are already connected
-    cursor.execute("""
+    execute(cursor, """
         SELECT *
         FROM connections
         WHERE user1 = ? AND user2 = ?
@@ -223,8 +280,7 @@ def send_request(sender, receiver):
         conn.close()
         return False
 
-    # Check for an existing pending request in either direction
-    cursor.execute("""
+    execute(cursor, """
         SELECT *
         FROM requests
         WHERE status = 'pending'
@@ -239,24 +295,21 @@ def send_request(sender, receiver):
         conn.close()
         return False
 
-    # Create the new request
-    cursor.execute("""
+    execute(cursor, """
         INSERT INTO requests (sender, receiver)
         VALUES (?, ?)
     """, (sender, receiver))
 
     conn.commit()
     conn.close()
-
     return True
 
 
-# Get incoming requests
 def get_incoming_requests(username):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT id, sender
         FROM requests
         WHERE receiver = ? AND status = 'pending'
@@ -264,16 +317,14 @@ def get_incoming_requests(username):
 
     requests = cursor.fetchall()
     conn.close()
-
     return requests
 
 
-# Get outgoing requests
 def get_outgoing_requests(username):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT id, receiver
         FROM requests
         WHERE sender = ? AND status = 'pending'
@@ -281,16 +332,14 @@ def get_outgoing_requests(username):
 
     requests = cursor.fetchall()
     conn.close()
-
     return requests
 
 
-# Accept a connection request
 def accept_request(request_id):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT sender, receiver
         FROM requests
         WHERE id = ? AND status = 'pending'
@@ -305,12 +354,12 @@ def accept_request(request_id):
     sender, receiver = request
     user1, user2 = sorted([sender, receiver])
 
-    cursor.execute("""
+    execute(cursor, """
         INSERT OR IGNORE INTO connections (user1, user2)
         VALUES (?, ?)
     """, (user1, user2))
 
-    cursor.execute("""
+    execute(cursor, """
         UPDATE requests
         SET status = 'accepted'
         WHERE id = ?
@@ -318,16 +367,14 @@ def accept_request(request_id):
 
     conn.commit()
     conn.close()
-
     return True
 
 
-# Reject a connection request
 def reject_request(request_id):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         UPDATE requests
         SET status = 'rejected'
         WHERE id = ? AND status = 'pending'
@@ -337,12 +384,11 @@ def reject_request(request_id):
     conn.close()
 
 
-# Cancel an outgoing connection request
 def cancel_request(sender, receiver):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         UPDATE requests
         SET status = 'cancelled'
         WHERE sender = ?
@@ -354,18 +400,16 @@ def cancel_request(sender, receiver):
 
     conn.commit()
     conn.close()
-
     return cancelled
 
 
-# Remove an existing connection
 def remove_connection(user1, user2):
     first, second = sorted([user1, user2])
 
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         DELETE FROM connections
         WHERE user1 = ? AND user2 = ?
     """, (first, second))
@@ -374,30 +418,27 @@ def remove_connection(user1, user2):
     conn.close()
 
 
-# Get all accepted connections
 def get_all_connections():
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT user1, user2
         FROM connections
     """)
 
     connections = cursor.fetchall()
     conn.close()
-
     return connections
 
 
 # ---------------- POSTS ----------------
 
-# Create a post
 def create_post(username, content):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         INSERT INTO posts (username, content)
         VALUES (?, ?)
     """, (username, content))
@@ -406,12 +447,11 @@ def create_post(username, content):
     conn.close()
 
 
-# Get all posts, newest first
 def get_all_posts():
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         SELECT id, username, content, created_at
         FROM posts
         ORDER BY created_at DESC
@@ -419,21 +459,17 @@ def get_all_posts():
 
     posts = cursor.fetchall()
     conn.close()
-
     return posts
 
 
-# Delete your own post
 def delete_post(post_id, username):
     conn = connect_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    execute(cursor, """
         DELETE FROM posts
         WHERE id = ? AND username = ?
     """, (post_id, username))
 
     conn.commit()
     conn.close()
-
-
